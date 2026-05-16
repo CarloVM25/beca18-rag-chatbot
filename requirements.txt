@@ -6,4 +6,4 @@ chromadb==0.6.3
 ipywidgets==8.1.5
 tqdm==4.67.1
 python-dotenv==1.1.0
-sentence-transformers==3.4.1
+sentence-transformers==5.5.0
