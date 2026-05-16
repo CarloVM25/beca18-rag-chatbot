@@ -32,7 +32,29 @@ CELLS = [
     ),
 
     # ── Step 0 ───────────────────────────────────────────────────────────────
-    md("## Step 0 — Environment setup", "md-step0"),
+    md(
+        "\n".join([
+            "## Step 0 — Environment setup",
+            "",
+            "Installs all required packages and initialises the Gemini client.",
+            "",
+            "**Packages and their roles:**",
+            "",
+            "| Package | Role |",
+            "|---|---|",
+            "| `pypdf` | Extracts raw text from each PDF page |",
+            "| `tiktoken` | Counts tokens using the `cl100k_base` vocabulary — a proxy for LLM context usage |",
+            "| `langchain-text-splitters` | Deterministic, overlap-aware text chunking |",
+            "| `sentence-transformers` | Local embedding model — fully offline, no API cost |",
+            "| `chromadb` | Embedded vector store with a persistent HNSW index |",
+            "| `google-genai` | Official Gemini SDK for answer generation |",
+            "| `ipywidgets` | Interactive chat UI inside the notebook |",
+            "",
+            "The `GEMINI_API_KEY` is read from a `.env` file rather than hardcoded to keep "
+            "credentials out of source control.",
+        ]),
+        "md-step0",
+    ),
 
     code(
         "%pip install -q pypdf tiktoken langchain-text-splitters "
@@ -81,7 +103,27 @@ CELLS = [
     ),
 
     # ── Step 1 ───────────────────────────────────────────────────────────────
-    md("## Step 1 — Extract text from PDF", "md-step1"),
+    md(
+        "\n".join([
+            "## Step 1 — Extract text from PDF",
+            "",
+            "Reads every page of the Beca 18 regulations PDF and produces a single cleaned string.",
+            "",
+            "**Design decisions:**",
+            "",
+            "- **`[PAGE N]` markers** are injected before each page's text so the LLM can cite "
+            "exact page numbers in its answers.",
+            "- **Double-space collapse** (`re.sub(r\" {2,}\", \" \", ...)`) removes the multiple "
+            "spaces that PDF extractors insert around column separators and footnote markers.",
+            "- **Soft-newline join** (`re.sub(r\"(?<!\\n)\\n(?!\\n)\", \" \", ...)`) merges lines "
+            "that belong to the same paragraph (single `\\n`) into one line, while preserving "
+            "paragraph breaks (`\\n\\n`). This keeps regulatory articles intact and improves "
+            "chunking quality downstream.",
+            "- Pages are joined with `\\n\\n` so the splitter in Step 2 can use paragraph "
+            "boundaries as natural split points.",
+        ]),
+        "md-step1",
+    ),
 
     code(
         "\n".join([
@@ -106,7 +148,20 @@ CELLS = [
     ),
 
     # ── Step 2 ───────────────────────────────────────────────────────────────
-    md("## Step 2 — Tokenisation and chunking", "md-step2"),
+    md(
+        "\n".join([
+            "## Step 2 — Tokenisation and chunking",
+            "",
+            "Counts the total token budget of the document, then splits the text into overlapping "
+            "chunks ready for embedding.",
+            "",
+            "**Tokenisation sub-cell:** `cl100k_base` is the same vocabulary used by GPT-4 and is "
+            "a reliable estimator for any modern LLM. Knowing the total token count tells you "
+            "whether the full document would fit in a single context window (it usually does not "
+            "for long regulations) and helps you reason about retrieval cost vs. context stuffing.",
+        ]),
+        "md-step2",
+    ),
 
     code(
         "\n".join([
@@ -119,19 +174,27 @@ CELLS = [
 
     md(
         "\n".join([
-            "### Why `chunk_size=800` with `overlap=100`?",
+            "### Chunking parameters — `chunk_size=400`, `chunk_overlap=60`",
             "",
-            "The `all-MiniLM-L6-v2` model generates 384-dimensional vectors optimised for semantic "
-            "similarity at **paragraph scale** — chunks that are too long dilute the signal, while "
-            "chunks that are too short lose context.",
+            "`RecursiveCharacterTextSplitter` tries to split on `\\n\\n` first (paragraph "
+            "boundary), then `\\n`, then `. `, then spaces — stopping as soon as the fragment fits "
+            "within `chunk_size` characters. This keeps grammatical units together.",
             "",
-            "* **800 characters** captures full regulatory articles (the Beca 18 document uses "
-            "multi-sentence clauses that belong together semantically), keeping embedding quality "
-            "high while keeping the total chunk count manageable.",
-            "* **100 characters of overlap** (~12 % of chunk size) ensures sentences that straddle "
-            "a boundary appear in both neighbouring chunks, preventing retrieval gaps at split points.",
-            "* Because `all-MiniLM-L6-v2` runs entirely locally with no API limits, chunk count "
-            "does not affect indexing cost.",
+            "**Why 400 characters?**  ",
+            "The Beca 18 regulations use short, dense clauses (one article ≈ one or two "
+            "sentences). At 800 chars the embedding model receives two unrelated articles in one "
+            "vector, diluting the semantic signal. At 400 chars each chunk encodes a single "
+            "coherent clause, giving the retriever a tighter match target.",
+            "",
+            "**Why 60 characters of overlap?**  ",
+            "~15 % of chunk size. A typical clause boundary falls mid-sentence; overlap ensures "
+            "that sentence appears in both the preceding and following chunk, so no evidence is "
+            "silently dropped at a split point.",
+            "",
+            "**Why character-count, not token-count?**  ",
+            "`all-MiniLM-L6-v2` has a 256-token input limit. At ~4 chars/token, "
+            "400 chars ≈ 100 tokens — well within that limit while leaving room for the "
+            "`[PAGE N]` marker.",
         ]),
         "md-chunk-rationale",
     ),
@@ -156,7 +219,29 @@ CELLS = [
     ),
 
     # ── Step 3 ───────────────────────────────────────────────────────────────
-    md("## Step 3 — Embedding functions (local, sentence-transformers)", "md-step3"),
+    md(
+        "\n".join([
+            "## Step 3 — Embedding functions (local, sentence-transformers)",
+            "",
+            "Loads `all-MiniLM-L6-v2` and exposes two helpers — one for batch indexing, one for "
+            "single-query retrieval.",
+            "",
+            "**Why this model?**",
+            "",
+            "- **Fully local** — no network call, no API key, no per-embedding cost.",
+            "- **384-dimensional output** — small enough for fast cosine search even with thousands "
+            "of chunks.",
+            "- **Trained for semantic similarity** — fine-tuned on over one billion sentence pairs; "
+            "it maps paraphrases and synonyms to nearby vectors, which matters when user questions "
+            "use different vocabulary than the regulation text "
+            "(e.g. *\"requisitos\"* ↔ *\"condiciones de postulación\"*).",
+            "",
+            "Two separate helpers (`embed_documents` for batches, `embed_query` for single "
+            "strings) keep the calling code explicit and make it straightforward to swap the model "
+            "later without touching the rest of the pipeline.",
+        ]),
+        "md-step3",
+    ),
 
     code(
         "\n".join([
@@ -174,7 +259,28 @@ CELLS = [
     ),
 
     # ── Step 4 ───────────────────────────────────────────────────────────────
-    md("## Step 4 — ChromaDB collection and indexing", "md-step4"),
+    md(
+        "\n".join([
+            "## Step 4 — ChromaDB collection and indexing",
+            "",
+            "Embeds every chunk and stores the vectors in a persistent ChromaDB collection.",
+            "",
+            "**Key decisions:**",
+            "",
+            "- **Drop-and-recreate on every run** — the `delete_collection` guard means re-running "
+            "this cell after changing chunk parameters always produces a clean, consistent index. "
+            "There is no risk of stale vectors from a previous parameterisation.",
+            "- **Cosine distance** (`hnsw:space: cosine`) normalises vector magnitude before "
+            "comparing, so a long chunk and a short chunk that express the same idea score equally. "
+            "L2 distance would unfairly penalise shorter chunks.",
+            "- **Batch size 100** — balances memory usage during embedding (each batch is encoded "
+            "by the CPU/GPU at once) against the number of upsert round-trips to ChromaDB.",
+            "- **`PersistentClient`** — the index is written to disk at `chroma_db_beca18/` and "
+            "survives kernel restarts. You do not have to re-index every time you open the "
+            "notebook, only when the chunks or embeddings change.",
+        ]),
+        "md-step4",
+    ),
 
     code(
         "\n".join([
@@ -215,7 +321,30 @@ CELLS = [
     ),
 
     # ── Step 5 ───────────────────────────────────────────────────────────────
-    md("## Step 5 — Semantic search", "md-step5"),
+    md(
+        "\n".join([
+            "## Step 5 — Semantic search",
+            "",
+            "Implements `semantic_search` and validates it against a sample question before "
+            "adding the LLM layer.",
+            "",
+            "**Why test retrieval in isolation?**",
+            "",
+            "Retrieval quality is the ceiling on answer quality — if the right chunks are not "
+            "fetched, no LLM can answer correctly. Running this step independently lets you:",
+            "",
+            "1. Confirm the relevant regulation text appears in the top-k results.",
+            "2. Inspect cosine distances: values below **0.3** indicate strong semantic overlap; "
+            "values above **0.5** suggest the question vocabulary diverges from the document "
+            "and re-phrasing or re-chunking may help.",
+            "3. Iterate on `chunk_size`, `chunk_overlap`, or query wording without spending "
+            "Gemini API quota.",
+            "",
+            "The function returns a plain list of dicts (`text`, `metadata`, `distance`) so "
+            "results are easy to inspect and the interface is backend-agnostic.",
+        ]),
+        "md-step5",
+    ),
 
     code(
         "\n".join([
@@ -251,7 +380,38 @@ CELLS = [
     ),
 
     # ── Step 6 ───────────────────────────────────────────────────────────────
-    md("## Step 6 — Answer generation with Gemini 2.5 Flash", "md-step6"),
+    md(
+        "\n".join([
+            "## Step 6 — Answer generation with Gemini 1.5 Flash",
+            "",
+            "Implements `answer_with_context` and runs it against five on-topic questions and one "
+            "off-topic control.",
+            "",
+            "**Pipeline:**",
+            "1. Retrieve the top-k chunks for the question (Step 5).",
+            "2. Format them as a numbered context block: "
+            "`[Fragmento 1]\\n…\\n\\n---\\n\\n[Fragmento 2]\\n…`",
+            "3. Send context + question to Gemini with a strict system prompt.",
+            "",
+            "**Design decisions:**",
+            "",
+            "- **System prompt grounding** — explicitly instructing the model to reply "
+            "*\"El documento no contiene información sobre este tema\"* when context is "
+            "insufficient prevents confident hallucination on queries not covered by the document.",
+            "- **`temperature=0.1`** — near-zero temperature makes responses deterministic and "
+            "factual; higher values introduce paraphrasing variation that is not useful for "
+            "regulatory Q&A.",
+            "- **Retry with exponential backoff** — `ServerError` is transient; waiting "
+            "`2^attempt` seconds (1 s, 2 s) before retrying avoids hammering the API during "
+            "brief outages.",
+            "- **Per-question `try/except`** — a single failing question does not abort the "
+            "evaluation loop; the error is reported inline and the loop continues.",
+            "- **Top-3 chunk debug print** — shows the exact cosine distance and first 200 "
+            "characters of each retrieved fragment so you can see precisely what context Gemini "
+            "receives, without having to re-run retrieval separately.",
+        ]),
+        "md-step6",
+    ),
 
     code(
         "\n".join([
@@ -331,7 +491,36 @@ CELLS = [
     ),
 
     # ── Step 7 ───────────────────────────────────────────────────────────────
-    md("## Step 7 — ipywidgets chat interface", "md-step7"),
+    md(
+        "\n".join([
+            "## Step 7 — ipywidgets chat interface",
+            "",
+            "Wraps the complete RAG pipeline in an interactive notebook UI — a text input, a "
+            "*k* slider, and Ask / Clear buttons — with no web server required.",
+            "",
+            "**`on_ask` correctness guarantee:**",
+            "",
+            "The function follows three strict rules to prevent the answer from rendering "
+            "multiple times:",
+            "",
+            "1. `output_area.clear_output(wait=True)` is called **at the very top** of `on_ask`, "
+            "before any other side-effect. This schedules a clear that fires on the widget's next "
+            "repaint, immediately replacing any stale content.",
+            "2. The API call and source-widget construction happen **outside** any "
+            "`with output_area:` context, so no intermediate output leaks into the widget.",
+            "3. All rendering — answer Markdown and source Accordions — happens inside "
+            "**exactly one** `with output_area:` block at the end of the function.",
+            "",
+            "**Source fragments** are displayed as collapsed `Accordion` widgets so the user can "
+            "inspect the retrieved evidence without cluttering the view. Each accordion title "
+            "shows the page number and cosine distance, giving a quick retrieval-quality signal.",
+            "",
+            "The **k slider** (1–10) lets the user adjust retrieval breadth at runtime. Higher k "
+            "provides more context to Gemini but may introduce noise if semantically distant "
+            "chunks are included.",
+        ]),
+        "md-step7",
+    ),
 
     code(
         "\n".join([
